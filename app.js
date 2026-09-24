@@ -49,6 +49,7 @@
     theme: 'day', fontSize: 19, font: 'Literata', lineHeight: 1.55, margin: 'normal', justify: true,
     layout: 'auto', sound: true, volume: 0.7, speed: 'normal', keepAwake: false,
     voice: '', rate: 1, pitch: 1, pdfInvert: true, dim: 0, lastDayTheme: 'day',
+    soundType: 'soft', pdfCrop: false,
   };
   let S = { ...DEFAULTS };
   try { Object.assign(S, JSON.parse(localStorage.getItem('sayfa.settings') || '{}')); } catch (e) { /* yok */ }
@@ -98,65 +99,111 @@
   }
 
   // ================= Sayfa çevirme sesi =================
+  // Kağıt sesi sentezi. Tüm katmanlar yumuşak pencerelerle (ani başlangıç yok) açılıp kapanır,
+  // böylece "tık/patlama" oluşmaz; en sonda sınırlayıcı taşmayı engeller.
+  function makeNoise(ctx) {
+    const len = ctx.sampleRate * 2;
+    const b = ctx.createBuffer(1, len, ctx.sampleRate); const d = b.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * 0.5;
+    return b;
+  }
+  // 0..1 aralığında yumuşak zarf eğrisi (tepe noktası `peakAt`), düzensiz kağıt kıpırtısıyla
+  function envCurve(n, peakAt, wobble) {
+    const c = new Float32Array(n);
+    const ph1 = Math.random() * 6, ph2 = Math.random() * 6;
+    for (let i = 0; i < n; i++) {
+      const x = i / (n - 1);
+      const u = x < peakAt ? x / peakAt : 1 - (x - peakAt) / (1 - peakAt);
+      const base = Math.pow(Math.sin(u * Math.PI / 2), 2);
+      const wob = 1 + wobble * (0.6 * Math.sin(x * 23 + ph1) + 0.4 * Math.sin(x * 41 + ph2));
+      c[i] = Math.max(0, base * wob);
+    }
+    c[0] = 0; c[n - 1] = 0;
+    return c;
+  }
+  function hann(n) { const c = new Float32Array(n); for (let i = 0; i < n; i++) c[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (n - 1)); return c; }
+
+  function synthPageTurn(ctx, noise, out, t, opt) {
+    const r = Math.random;
+    const D = opt.dur;           // toplam süre (sn)
+    const crisp = opt.crisp;
+    const bus = ctx.createGain(); bus.gain.value = opt.volume; bus.connect(out);
+
+    // 1) gövde: kağıdın havayı süpürmesi (yumuşak hışırtı)
+    const a = ctx.createBufferSource(); a.buffer = noise; a.playbackRate.value = 0.85 + r() * 0.2;
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 280; hp.Q.value = 0.5;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 0.4;
+    lp.frequency.setValueAtTime(900 + r() * 200, t);
+    lp.frequency.linearRampToValueAtTime((crisp ? 5200 : 3400) + r() * 600, t + D * 0.4);
+    lp.frequency.linearRampToValueAtTime(1400 + r() * 300, t + D);
+    const ga = ctx.createGain(); ga.gain.value = 0;
+    const peak = crisp ? 0.5 : 0.38;
+    ga.gain.setValueCurveAtTime(envCurve(96, 0.32 + r() * 0.08, 0.22).map((v) => v * peak), t, D);
+    a.connect(hp); hp.connect(lp); lp.connect(ga); ga.connect(bus);
+    a.start(t, r() * 1.2); a.stop(t + D + 0.05);
+
+    // 2) doku: lif sürtünmesi (çok kısa, yumuşak pencereli tanecikler)
+    const n = crisp ? 12 + Math.floor(r() * 8) : 6 + Math.floor(r() * 5);
+    for (let i = 0; i < n; i++) {
+      const x = Math.pow(r(), 0.8);
+      const at = t + D * (0.1 + x * 0.7);
+      const len = 0.018 + r() * 0.03;
+      const g = ctx.createBufferSource(); g.buffer = noise;
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2400 + r() * 3600; bp.Q.value = 1.2;
+      const gg = ctx.createGain(); gg.gain.value = 0;
+      const amp = (crisp ? 0.22 : 0.12) * (0.4 + r() * 0.6);
+      gg.gain.setValueCurveAtTime(hann(32).map((v) => v * amp), at, len);
+      g.connect(bp); bp.connect(gg); gg.connect(bus);
+      g.start(at, r() * 1.5); g.stop(at + len + 0.02);
+    }
+
+    // 3) sayfanın yerine yumuşakça oturması
+    const st = t + D * (0.78 + r() * 0.06);
+    const s = ctx.createBufferSource(); s.buffer = noise;
+    const sl = ctx.createBiquadFilter(); sl.type = 'lowpass'; sl.frequency.value = 1100 + r() * 300;
+    const sg = ctx.createGain(); sg.gain.value = 0;
+    sg.gain.setValueCurveAtTime(hann(48).map((v) => v * (crisp ? 0.22 : 0.15)), st, 0.11);
+    s.connect(sl); sl.connect(sg); sg.connect(bus);
+    s.start(st, r()); s.stop(st + 0.15);
+  }
+
   const Sfx = {
-    ctx: null, noise: null, last: 0,
+    ctx: null, noise: null, out: null, custom: null, last: 0,
     init() {
       if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
       const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
       this.ctx = new AC();
-      const len = this.ctx.sampleRate * 2;
-      const b = this.ctx.createBuffer(1, len, this.ctx.sampleRate); const d = b.getChannelData(0);
-      let last = 0; // hafif pembe gürültü
-      for (let i = 0; i < len; i++) { const w = Math.random() * 2 - 1; last = 0.82 * last + 0.18 * w; d[i] = w * 0.55 + last * 0.9; }
-      this.noise = b;
+      this.noise = makeNoise(this.ctx);
+      const comp = this.ctx.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.knee.value = 12; comp.ratio.value = 6; comp.attack.value = 0.004; comp.release.value = 0.15;
+      comp.connect(this.ctx.destination);
+      this.out = comp;
+      this.loadCustom();
+    },
+    loadCustom() {
+      this.custom = null;
+      let data = null;
+      try { data = localStorage.getItem('sayfa.sound'); } catch (e) { /* yok */ }
+      if (!data || !this.ctx) return;
+      fetch(data).then((r) => r.arrayBuffer()).then((b) => this.ctx.decodeAudioData(b)).then((buf) => { this.custom = buf; }).catch(() => {});
     },
     flip() {
       if (!S.sound) return;
-      const now = performance.now(); if (now - this.last < 180) return; this.last = now;
+      const now = performance.now(); if (now - this.last < 200) return; this.last = now;
       this.init(); const ctx = this.ctx; if (!ctx) return;
-      const r = Math.random; const t = ctx.currentTime + 0.005;
-      const dur = (SPEEDS[S.speed] || 750) / 1000;
-      const k = Math.min(1.35, Math.max(0.7, dur / 0.75));
-      const master = ctx.createGain(); master.gain.value = S.volume * 0.9; master.connect(ctx.destination);
-
-      // 1) kağıdın havada süzülme hışırtısı
-      const src = ctx.createBufferSource(); src.buffer = this.noise; src.playbackRate.value = 0.9 + r() * 0.25;
-      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 0.7 + r() * 0.4;
-      bp.frequency.setValueAtTime(700 + r() * 300, t);
-      bp.frequency.exponentialRampToValueAtTime(3400 + r() * 1400, t + 0.14 * k);
-      bp.frequency.exponentialRampToValueAtTime(1300 + r() * 400, t + 0.45 * k);
-      const hs = ctx.createBiquadFilter(); hs.type = 'highshelf'; hs.frequency.value = 5000; hs.gain.value = 4;
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.5, t + 0.045 * k);
-      g.gain.exponentialRampToValueAtTime(0.32, t + 0.16 * k);
-      g.gain.exponentialRampToValueAtTime(0.14, t + 0.32 * k);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.52 * k);
-      // kağıt titreşimi (flutter)
-      const lfo = ctx.createOscillator(); lfo.frequency.value = 16 + r() * 10;
-      const lfoG = ctx.createGain(); lfoG.gain.value = 0.09;
-      lfo.connect(lfoG); lfoG.connect(g.gain);
-      src.connect(bp); bp.connect(hs); hs.connect(g); g.connect(master);
-      src.start(t, r() * 1.2); src.stop(t + 0.6 * k); lfo.start(t); lfo.stop(t + 0.6 * k);
-
-      // 2) kağıt çıtırtıları
-      const n = 5 + Math.floor(r() * 6);
-      for (let i = 0; i < n; i++) {
-        const at = t + (0.02 + r() * 0.3) * k;
-        const c = ctx.createBufferSource(); c.buffer = this.noise;
-        const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2200 + r() * 3000;
-        const cg = ctx.createGain(); const len = 0.006 + r() * 0.014;
-        cg.gain.setValueAtTime(0.0001, at); cg.gain.exponentialRampToValueAtTime(0.12 + r() * 0.22, at + 0.002); cg.gain.exponentialRampToValueAtTime(0.0001, at + len);
-        c.connect(hp); hp.connect(cg); cg.connect(master); c.start(at, r() * 1.5); c.stop(at + len + 0.01);
+      const t = ctx.currentTime + 0.01;
+      if (S.soundType === 'custom' && this.custom) {
+        const src = ctx.createBufferSource(); src.buffer = this.custom;
+        const g = ctx.createGain(); g.gain.value = S.volume;
+        src.connect(g); g.connect(this.out); src.start(t);
+        return;
       }
-
-      // 3) sayfanın yerine oturması (yumuşak "tap")
-      const tt = t + (0.36 + r() * 0.06) * k;
-      const th = ctx.createBufferSource(); th.buffer = this.noise;
-      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420 + r() * 200;
-      const tg = ctx.createGain();
-      tg.gain.setValueAtTime(0.0001, tt); tg.gain.exponentialRampToValueAtTime(0.5, tt + 0.008); tg.gain.exponentialRampToValueAtTime(0.0001, tt + 0.09);
-      th.connect(lp); lp.connect(tg); tg.connect(master); th.start(tt, r()); th.stop(tt + 0.12);
+      const flipMs = SPEEDS[S.speed] || 750;
+      synthPageTurn(ctx, this.noise, this.out, t, {
+        dur: Math.min(0.75, Math.max(0.38, flipMs / 1000 * 0.62)),
+        crisp: S.soundType === 'crisp',
+        volume: S.volume,
+      });
     },
   };
   document.addEventListener('pointerdown', () => Sfx.init(), { once: true });
@@ -195,6 +242,41 @@
 
   const stage = $('#stage');
   const reader = $('#reader');
+
+  // Yakınlaştırma durumu: kitap sarmalayıcısına translate + scale uygulanır
+  const Z = {
+    scale: 1, x: 0, y: 0, t: 0,
+    wrap() { return stage.querySelector('.book-wrap'); },
+    apply(anim) {
+      const w = this.wrap();
+      if (w) {
+        w.style.transition = anim ? 'transform .25s ease' : 'none';
+        w.style.transform = this.scale > 1.001 || this.x || this.y ? 'translate(' + this.x + 'px,' + this.y + 'px) scale(' + this.scale + ')' : '';
+      }
+      reader.classList.toggle('zoomed', this.scale > 1.01);
+      if (typeof updateZoomUI === 'function') updateZoomUI();
+    },
+    clamp() {
+      const b = stage.querySelector('.book'); if (!b) return;
+      const W = stage.clientWidth, H = stage.clientHeight;
+      const mx = Math.max(0, (b.offsetWidth * this.scale - W) / 2 + 12);
+      const my = Math.max(0, (b.offsetHeight * this.scale - H) / 2 + 12);
+      this.x = Math.max(-mx, Math.min(mx, this.x));
+      this.y = Math.max(-my, Math.min(my, this.y));
+    },
+    setScale(s, cx, cy, anim) {
+      s = Math.max(1, Math.min(4, s));
+      const px = cx - stage.clientWidth / 2, py = cy - stage.clientHeight / 2;
+      this.x = px - (px - this.x) * (s / this.scale);
+      this.y = py - (py - this.y) * (s / this.scale);
+      this.scale = s;
+      if (s <= 1.01) { this.scale = 1; this.x = 0; this.y = 0; }
+      this.clamp(); this.apply(anim); this.settle();
+    },
+    reset(silent) { this.scale = 1; this.x = 0; this.y = 0; if (!silent) { this.apply(true); this.settle(); } },
+    toTop() { if (this.scale > 1.01) { this.y = 1e6; this.clamp(); this.apply(true); } },
+    settle() { clearTimeout(this.t); this.t = setTimeout(() => { if (R.pf) renderPdfAround(R.cur); }, 280); },
+  };
 
   // ---------- kaynak HTML'i temizle ve bloklara ayır ----------
   const BLOCK = new Set(['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'PRE', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TD', 'TH', 'SECTION', 'ARTICLE', 'FIGURE', 'FIGCAPTION', 'HR', 'DL', 'DT', 'DD', 'ASIDE', 'HEADER', 'FOOTER', 'NAV', 'MAIN', 'CENTER', 'ADDRESS', 'BODY', 'CAPTION']);
@@ -330,15 +412,17 @@
   // ---------- boyutlar ----------
   function computeDims() {
     const W = stage.clientWidth, H = stage.clientHeight;
-    const padX = W < 520 ? 8 : 22, padY = H < 520 ? 8 : 18;
+    const padX = W < 520 ? 6 : 14, padY = H < 520 ? 6 : 10;
     const aw = W - padX * 2, ah = H - padY * 2;
     let spread = S.layout === 'double' || (S.layout === 'auto' && aw / ah > 0.82 && aw >= 560);
     if (S.layout === 'double' && aw < 400) spread = false;
     let pw, ph;
     if (R.kind === 'pdf') {
       const a = R.pdfSize ? R.pdfSize.w / R.pdfSize.h : 0.707;
-      const maxW = spread ? aw / 2 : aw;
-      pw = Math.min(maxW, ah * a); ph = pw / a;
+      const single = Math.min(aw, ah * a), double = Math.min(aw / 2, ah * a);
+      // otomatikte: iki sayfa yan yana sayfaları belirgin küçültüyorsa tek sayfa göster
+      if (S.layout === 'auto') spread = aw >= 560 && double >= single * 0.88;
+      pw = spread ? double : single; ph = pw / a;
     } else {
       ph = ah;
       pw = spread ? aw / 2 : aw;
@@ -488,40 +572,93 @@
     return pages;
   }
 
+  // Beyaz kenar boşluklarını bul: birkaç örnek sayfanın içerik kutularını birleştir
+  async function detectPdfCrop(pdf) {
+    const n = pdf.numPages;
+    const picks = [...new Set([1, 2, 3, Math.floor(n / 2), n - 1].filter((p) => p >= 1 && p <= n))].slice(0, 5);
+    let box = null;
+    for (const pn of picks) {
+      try {
+        const page = await pdf.getPage(pn);
+        const v1 = page.getViewport({ scale: 1 });
+        const vp = page.getViewport({ scale: 220 / v1.width });
+        const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        const d = ctx.getImageData(0, 0, c.width, c.height).data;
+        let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+        for (let y = 0; y < c.height; y++) {
+          for (let x = 0; x < c.width; x++) {
+            const o = (y * c.width + x) * 4;
+            if (d[o] + d[o + 1] + d[o + 2] < 690) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+          }
+        }
+        if (x1 < 0) continue; // boş sayfa
+        const b = { x0: x0 / c.width, y0: y0 / c.height, x1: (x1 + 1) / c.width, y1: (y1 + 1) / c.height };
+        box = box ? { x0: Math.min(box.x0, b.x0), y0: Math.min(box.y0, b.y0), x1: Math.max(box.x1, b.x1), y1: Math.max(box.y1, b.y1) } : b;
+      } catch (e) { /* atla */ }
+    }
+    if (!box) return null;
+    const m = 0.02; // biraz nefes payı bırak
+    box = { x0: Math.max(0, box.x0 - m), y0: Math.max(0, box.y0 - m), x1: Math.min(1, box.x1 + m), y1: Math.min(1, box.y1 + m) };
+    if (box.x1 - box.x0 > 0.95 && box.y1 - box.y0 > 0.95) return null; // kırpmaya değmez
+    if (box.x1 - box.x0 < 0.3 || box.y1 - box.y0 < 0.3) return null;   // şüpheli sonuç
+    return box;
+  }
+
+  function applyCropSize() {
+    const c = R.crop || { x0: 0, y0: 0, x1: 1, y1: 1 };
+    R.pdfSize = { w: R.pdfSize0.w * (c.x1 - c.x0), h: R.pdfSize0.h * (c.y1 - c.y0) };
+  }
+
+  // yakınlaştırma düzeyine göre çizim kalitesi (net görüntü için)
+  const zoomQ = () => (Z.scale <= 1.05 ? 1 : Z.scale <= 1.6 ? 1.6 : Z.scale <= 2.3 ? 2.3 : 3.2);
+
   let pdfQueue = Promise.resolve();
   function renderPdfAround(idx) {
     if (R.kind !== 'pdf') return;
     const tok = R.token;
-    const want = [];
-    for (let d = 0; d <= 4; d++) { want.push(idx + d); if (d && d <= 2) want.push(idx - d); }
+    const vis = visiblePages();
+    const want = [...vis];
+    for (let d = 1; d <= 4; d++) { want.push(idx + d); if (d <= 2) want.push(idx - d); }
     pdfQueue = pdfQueue.then(async () => {
       for (const i of want) {
         if (tok !== R.token) return;
-        if (i < 0 || i >= R.pages.length || R.rendered.has(i)) continue;
-        await renderPdfPage(i, tok);
+        if (i < 0 || i >= R.pages.length) continue;
+        const q = vis.includes(i) ? zoomQ() : 1;
+        const have = R.rendered.get(i);
+        if (have && have.q >= q) continue;
+        await renderPdfPage(i, tok, q);
       }
-      // uzaktaki tuvalleri bırak (bellek)
-      for (const [i, c] of R.rendered) {
-        if (Math.abs(i - idx) > 8) { c.width = 0; c.height = 0; c.remove(); R.rendered.delete(i); R.pages[i].querySelector('.pdf-holder').innerHTML = '<span class="ph">' + (i + 1) + '</span>'; }
+      // uzaktaki tuvalleri bırak, görünmeyen yüksek çözünürlüklüleri küçült (bellek)
+      for (const [i, e] of R.rendered) {
+        if (Math.abs(i - idx) > 8) { e.c.width = 0; e.c.height = 0; e.c.remove(); R.rendered.delete(i); R.pages[i].querySelector('.pdf-holder').innerHTML = '<span class="ph">' + (i + 1) + '</span>'; }
       }
     }).catch((e) => console.warn(e));
   }
-  async function renderPdfPage(i, tok) {
+  async function renderPdfPage(i, tok, q = 1) {
     const page = await R.pdf.getPage(i + 1);
     if (tok !== R.token) return;
-    const vp1 = page.getViewport({ scale: 1 });
-    const s = Math.min(R.pw / vp1.width, R.ph / vp1.height);
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const vp = page.getViewport({ scale: s * dpr });
+    const v1 = page.getViewport({ scale: 1 });
+    const cr = R.crop || { x0: 0, y0: 0, x1: 1, y1: 1 };
+    const cw = v1.width * (cr.x1 - cr.x0), ch = v1.height * (cr.y1 - cr.y0);
+    const s = Math.min(R.pw / cw, R.ph / ch);
+    const cssW = cw * s, cssH = ch * s;
+    let k = Math.min(window.devicePixelRatio || 1, 2) * q;
+    k = Math.min(k, Math.sqrt(9e6 / (cssW * cssH))); // tuval başına ~9 MP sınırı
+    const vp = page.getViewport({ scale: s * k, offsetX: -v1.width * cr.x0 * s * k, offsetY: -v1.height * cr.y0 * s * k });
     const c = document.createElement('canvas');
-    c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
-    c.style.width = Math.floor(vp.width / dpr) + 'px'; c.style.height = Math.floor(vp.height / dpr) + 'px';
+    c.width = Math.floor(cssW * k); c.height = Math.floor(cssH * k);
+    c.style.width = Math.floor(cssW) + 'px'; c.style.height = Math.floor(cssH) + 'px';
     const ctx = c.getContext('2d', { alpha: false });
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
     await page.render({ canvasContext: ctx, viewport: vp }).promise;
     if (tok !== R.token) return;
+    const old = R.rendered.get(i);
     R.pages[i].querySelector('.pdf-holder').replaceChildren(c);
-    R.rendered.set(i, c);
+    if (old) { old.c.width = 0; old.c.height = 0; }
+    R.rendered.set(i, { c, q });
   }
 
   // ---------- kitap oluştur (PageFlip) ----------
@@ -552,6 +689,7 @@
     holder.style.height = R.ph + 'px';
     wrap.appendChild(holder);
     stage.appendChild(wrap);
+    Z.clamp(); Z.apply(false);
     start = Math.max(0, Math.min(start || 0, R.pages.length - 1));
     const pf = new window.St.PageFlip(holder, {
       width: R.pw, height: R.ph, size: 'fixed', autoSize: false,
@@ -587,6 +725,7 @@
     $('#chapTitle').textContent = R.kind === 'flow' ? (R.chapAt[vis[0]] || '') : (R.pdfChap ? R.pdfChap(vis[0]) : '');
     $('#btnMark').classList.toggle('on', isMarked());
     renderPdfAround(idx);
+    if (fromFlip) Z.toTop();
     saveProgress();
     if (fromFlip && TTS.active && !TTS.autoFlip) TTS.restartAt(vis[0]);
   }
@@ -623,7 +762,7 @@
         for (let i = 0; i < R.starts.length; i++) { if (R.starts[i] <= b) startPage = i; else break; }
       } else if (keepPos && keepPos.ratio != null) startPage = Math.round(keepPos.ratio * (pages.length - 1));
     } else {
-      R.rendered.forEach((c) => { c.width = 0; c.height = 0; });
+      R.rendered.forEach((e) => { e.c.width = 0; e.c.height = 0; });
       R.rendered.clear();
       R.pages = makePdfPages();
       startPage = keepPos && keepPos.page != null ? keepPos.page : 0;
@@ -685,7 +824,9 @@
       if (parsed.kind === 'pdf') {
         R.pdf = parsed.pdf;
         const p1 = await R.pdf.getPage(1); const vp = p1.getViewport({ scale: 1 });
-        R.pdfSize = { w: vp.width, h: vp.height };
+        R.pdfSize0 = { w: vp.width, h: vp.height };
+        R.crop = S.pdfCrop ? await detectPdfCrop(R.pdf) : null;
+        applyCropSize();
         R.toc = await pdfOutline(R.pdf);
         R.pdfChap = (i) => { let t = ''; for (const x of R.toc) { if (x.page <= i) t = x.text; } return t; };
       } else {
@@ -749,13 +890,15 @@
     stage.querySelectorAll('.book-wrap').forEach((b) => b.remove());
     if (R.pdf) { try { R.pdf.destroy(); } catch (e) { /* yok */ } }
     R.urls.forEach((u) => URL.revokeObjectURL(u));
-    Object.assign(R, { id: null, rec: null, pdf: null, pages: [], blocks: [], toc: [], starts: [], chapAt: [], urls: [], pdfChap: null, pdfSize: null });
+    Object.assign(R, { id: null, rec: null, pdf: null, pages: [], blocks: [], toc: [], starts: [], chapAt: [], urls: [], pdfChap: null, pdfSize: null, pdfSize0: null, crop: null });
+    Z.reset(true);
     R.rendered.clear();
   }
 
   function closeReader() {
     saveProgressNow();
     closeBookData();
+    $('#zoomPill').hidden = true;
     show('library');
     renderLibrary();
     updateWake();
@@ -1012,21 +1155,112 @@
     reader.classList.toggle('chrome-hidden');
   }
 
-  let down = null;
+  // ---------- yakınlaştırma: iki parmak, çift dokunma, kaydırma ----------
+  let gestureEndAt = 0;
+  let T = null;
+  const tdist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  const tmid = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
+  function abortPageFlipTouch() {
+    try {
+      const ui = R.pf && R.pf.getUI(); if (ui) ui.touchPoint = null;
+      if (R.pf) { R.pf.userStop({ x: 0, y: 0 }, true); if (R.pf.getState() === 'user_fold') R.pf.getFlipController().stopMove(); }
+    } catch (e) { /* yok */ }
+  }
+  stage.addEventListener('touchstart', (e) => {
+    if (!R.pf) return;
+    if (e.touches.length >= 2) {
+      abortPageFlipTouch();
+      const [a, b] = e.touches;
+      T = { mode: 'pinch', d0: tdist(a, b) || 1, s0: Z.scale, m0: tmid(a, b), x0: Z.x, y0: Z.y };
+      e.stopPropagation(); if (e.cancelable) e.preventDefault();
+      return;
+    }
+    if (Z.scale > 1.01) {
+      const t = e.touches[0];
+      T = { mode: 'pan', sx: t.clientX, sy: t.clientY, x0: Z.x, y0: Z.y, moved: false };
+    }
+  }, { capture: true, passive: false });
+  stage.addEventListener('touchmove', (e) => {
+    if (!T) return;
+    const W = stage.clientWidth, H = stage.clientHeight;
+    if (T.mode === 'pinch' && e.touches.length >= 2) {
+      const [a, b] = e.touches;
+      const s = Math.max(1, Math.min(4, T.s0 * tdist(a, b) / T.d0));
+      const m = tmid(a, b);
+      Z.x = (m.x - W / 2) - ((T.m0.x - W / 2) - T.x0) * (s / T.s0);
+      Z.y = (m.y - H / 2) - ((T.m0.y - H / 2) - T.y0) * (s / T.s0);
+      Z.scale = s; Z.clamp(); Z.apply(false);
+    } else if (T.mode === 'pan') {
+      const t = e.touches[0];
+      const dx = t.clientX - T.sx, dy = t.clientY - T.sy;
+      if (Math.abs(dx) + Math.abs(dy) > 8) T.moved = true;
+      Z.x = T.x0 + dx; Z.y = T.y0 + dy; Z.clamp(); Z.apply(false);
+    }
+    e.stopPropagation(); if (e.cancelable) e.preventDefault();
+  }, { capture: true, passive: false });
+  stage.addEventListener('touchend', (e) => {
+    if (!T) return;
+    if (T.mode === 'pinch') {
+      e.stopPropagation();
+      if (e.touches.length === 0) {
+        T = null; gestureEndAt = performance.now();
+        if (Z.scale < 1.06) Z.reset(); else Z.settle();
+      }
+      return;
+    }
+    if (T.moved) gestureEndAt = performance.now();
+    T = null;
+    Z.settle();
+  }, { capture: true });
+  stage.addEventListener('wheel', (e) => {
+    if (!R.pf) return;
+    if (e.ctrlKey) { e.preventDefault(); Z.setScale(Z.scale * (e.deltaY < 0 ? 1.12 : 1 / 1.12), e.clientX, e.clientY, false); }
+    else if (Z.scale > 1.01) { e.preventDefault(); Z.x -= e.deltaX; Z.y -= e.deltaY; Z.clamp(); Z.apply(false); Z.settle(); }
+  }, { passive: false });
+
+  // ---------- dokunma: kenarlar sayfa çevirir, orta menüleri açar, çift dokunma büyütür ----------
+  let down = null, lastTap = null, tapT = null;
   stage.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; }, true);
   stage.addEventListener('pointerup', (e) => {
     if (!down || !R.pf) return;
     const dx = Math.abs(e.clientX - down.x), dy = Math.abs(e.clientY - down.y), dt = performance.now() - down.t;
     down = null;
     if (dx > 12 || dy > 12 || dt > 450) return;
+    if (performance.now() - gestureEndAt < 300) return;
     const x = e.clientX / stage.clientWidth;
-    setTimeout(() => {
-      if (performance.now() - R.lastFlipAt < 350) return; // PageFlip köşe tıklamasını zaten işledi
-      if (x < 0.25) { R.pf.flipPrev('bottom'); }
-      else if (x > 0.75) { R.pf.flipNext('bottom'); }
+    const now = performance.now();
+    const edge = x < 0.22 || x > 0.78;
+    if (!edge && lastTap && now - lastTap.t < 300 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 40) {
+      clearTimeout(tapT); lastTap = null;
+      if (Z.scale > 1.01) Z.reset(); else Z.setScale(2.2, e.clientX, e.clientY, true);
+      return;
+    }
+    lastTap = { t: now, x: e.clientX, y: e.clientY };
+    const act = () => {
+      if (performance.now() - R.lastFlipAt < 350) return; // PageFlip köşe dokunuşunu zaten işledi
+      if (x < 0.22) R.pf.flipPrev('bottom');
+      else if (x > 0.78) R.pf.flipNext('bottom');
       else toggleChrome();
-    }, 40);
+    };
+    clearTimeout(tapT);
+    tapT = setTimeout(act, edge ? 40 : 300);
   }, true);
+
+  function toggleZoomPill(force) {
+    const p = $('#zoomPill');
+    p.hidden = force != null ? !force : !p.hidden;
+    updateZoomUI();
+  }
+  function updateZoomUI() {
+    const p = $('#zoomPill');
+    if (Z.scale > 1.01) p.hidden = false;
+    $('#zoomVal').textContent = Math.round(Z.scale * 100) + '%';
+    $('#btnZoom').classList.toggle('on', Z.scale > 1.01);
+  }
+  $('#btnZoom').onclick = () => toggleZoomPill();
+  $('#zoomIn').onclick = () => Z.setScale(Z.scale + 0.25, stage.clientWidth / 2, stage.clientHeight / 2, true);
+  $('#zoomOut').onclick = () => Z.setScale(Z.scale - 0.25, stage.clientWidth / 2, stage.clientHeight / 2, true);
+  $('#zoomFit').onclick = () => { Z.reset(); toggleZoomPill(false); };
 
   document.addEventListener('keydown', (e) => {
     if (!reader.classList.contains('active') || !R.pf || !$('#sheet').hidden) return;
@@ -1154,9 +1388,12 @@
       '</div>' +
       '<div class="set-group"><h4>Sayfa çevirme</h4>' +
         '<div class="set-row"><span>Çevirme sesi</span>' + sw('sound', S.sound) + '</div>' +
-        '<div class="set-row"><span>Ses düzeyi</span><input type="range" min="0.1" max="1" step="0.05" value="' + S.volume + '" data-range="volume"></div>' +
+        chips('soundType', [['soft', 'Yumuşak kağıt'], ['crisp', 'Belirgin kağıt'], ['custom', 'Kendi sesim']], S.soundType) +
+        '<div class="set-row" style="margin-top:6px"><span>Ses düzeyi</span><input type="range" min="0.05" max="1" step="0.05" value="' + S.volume + '" data-range="volume"></div>' +
         '<div class="set-row"><span>Çevirme hızı</span>' + chips('speed', [['slow', 'Yavaş'], ['normal', 'Normal'], ['fast', 'Hızlı']], S.speed) + '</div>' +
-        '<button class="btn ghost" id="testFlip" style="margin-top:8px">Sesi dene</button>' +
+        '<div class="btn-col" style="grid-template-columns:1fr 1fr"><button class="btn ghost" id="testFlip">Sesi dene</button><button class="btn ghost" id="pickSound">Ses dosyası seç</button></div>' +
+        '<p class="note" style="padding-bottom:0">"Kendi sesim" ile telefonunuzdaki herhangi bir kısa sayfa çevirme sesini (MP3, WAV, OGG) kullanabilirsiniz.</p>' +
+        '<input type="file" id="soundFile" accept="audio/*" hidden>' +
       '</div>' +
       '<div class="set-group"><h4>Sesli okuma</h4>' +
         '<select id="voiceSel" aria-label="Ses">' + voiceOpts + '</select>' +
@@ -1167,6 +1404,7 @@
       '<div class="set-group"><h4>Ekran</h4>' +
         '<div class="set-row"><span>Okurken ekranı hep açık tut<small>Sesli okuma dışında da</small></span>' + sw('keepAwake', S.keepAwake) + '</div>' +
         '<div class="set-row"><span>PDF sayfalarını gece moduna uyarla</span>' + sw('pdfInvert', S.pdfInvert) + '</div>' +
+        '<div class="set-row"><span>PDF kenar boşluklarını kırp<small>Yazıyı büyütmek için beyaz kenarları keser</small></span>' + sw('pdfCrop', S.pdfCrop) + '</div>' +
       '</div>';
     openSheet('Ayarlar', html, (b) => {
       let relayout = false;
@@ -1179,6 +1417,10 @@
             grp.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === btn));
             if (k === 'theme') { if (S.theme === 'day' || S.theme === 'sepia') S.lastDayTheme = S.theme; applyTheme(); }
             else if (k === 'speed') { if (R.pf) { const pos = currentPos(); buildBook(R.kind === 'flow' ? visiblePages()[0] : pos.page); } }
+            else if (k === 'soundType') {
+              if (S.soundType === 'custom' && !Sfx.custom) { $('#soundFile').click(); return; }
+              Sfx.last = 0; Sfx.flip();
+            }
             else relayoutSoon();
           };
         });
@@ -1200,8 +1442,33 @@
           if (k === 'justify') { applyTheme(); relayoutSoon(); }
           if (k === 'pdfInvert') applyTheme();
           if (k === 'keepAwake') updateWake();
+          if (k === 'pdfCrop' && R.kind === 'pdf' && R.pdf) {
+            (async () => {
+              const pos = currentPos();
+              R.crop = S.pdfCrop ? await detectPdfCrop(R.pdf) : null;
+              applyCropSize();
+              if (S.pdfCrop && !R.crop) toast('Bu PDF\'te kırpılacak belirgin bir boşluk yok');
+              layout(pos);
+            })();
+          }
         };
       });
+      $('#soundFile').onchange = (e) => {
+        const f = e.target.files && e.target.files[0]; e.target.value = '';
+        if (!f) return;
+        if (f.size > 1.5 * 1024 * 1024) { toast('Ses dosyası en fazla 1,5 MB olabilir. Kısa bir kayıt seçin.', 4000); return; }
+        const rd = new FileReader();
+        rd.onload = () => {
+          try { localStorage.setItem('sayfa.sound', rd.result); } catch (err) { toast('Ses kaydedilemedi (çok büyük)'); return; }
+          S.soundType = 'custom'; saveSettings();
+          Sfx.init(); Sfx.loadCustom();
+          setTimeout(() => { Sfx.last = 0; Sfx.flip(); }, 400);
+          b.querySelectorAll('[data-set=soundType] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.v === 'custom'));
+          toast('Kendi sesiniz ayarlandı: ' + f.name);
+        };
+        rd.readAsDataURL(f);
+      };
+      const pick = $('#pickSound'); if (pick) pick.onclick = () => $('#soundFile').click();
       $('#voiceSel').onchange = (e) => { S.voice = e.target.value; saveSettings(); if (TTS.active && !TTS.paused) { TTS.token++; synth.cancel(); TTS.next(TTS.token); } };
       $('#testFlip').onclick = () => { Sfx.last = 0; Sfx.flip(); };
       const obs = new MutationObserver(() => { if ($('#sheet').hidden) { obs.disconnect(); doRelayout(); } });
@@ -1385,5 +1652,5 @@
   }
   boot();
 
-  window.__sayfa = { R, S, TTS, Sfx, layout, addFiles, openBook };
+  window.__sayfa = { R, S, Z, TTS, Sfx, layout, addFiles, openBook, synthPageTurn, makeNoise };
 })();

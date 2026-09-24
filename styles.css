@@ -261,6 +261,19 @@ body[data-theme="sepia"] .pdf-holder canvas { filter: sepia(.28) brightness(.97)
 #ttsPill button { width: 34px; height: 34px; border-radius: 50%; border: 0; background: var(--accent); color: var(--accent-fg); display: grid; place-items: center; }
 #ttsPill button svg { width: 18px; height: 18px; }
 #reader:not(.chrome-hidden) #ttsPill { opacity: 0; pointer-events: none; }
+.book-wrap { transform-origin: 50% 50%; }
+#reader.zoomed .book { pointer-events: none; }
+#zoomPill {
+  position: absolute; left: 50%; top: calc(66px + env(safe-area-inset-top)); transform: translateX(-50%); z-index: 21;
+  display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 999px;
+  background: var(--bar); color: var(--bar-fg); box-shadow: 0 8px 24px -10px rgba(0,0,0,.7);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); transition: top .28s ease;
+}
+#reader.chrome-hidden #zoomPill { top: calc(10px + env(safe-area-inset-top)); opacity: .85; }
+#zoomPill button { height: 38px; min-width: 38px; border: 0; border-radius: 999px; background: var(--line); color: inherit; display: grid; place-items: center; cursor: pointer; }
+#zoomPill button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+#zoomPill button.fit { padding: 0 14px; font-weight: 700; font-size: 13px; background: var(--accent); color: var(--accent-fg); }
+#zoomPill b { min-width: 52px; text-align: center; font-size: 14px; font-variant-numeric: tabular-nums; }
 @keyframes pulse { 50% { opacity: .3; transform: scale(.8); } }
 
 #loading { position: absolute; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: var(--desk); color: #efe6d6; }

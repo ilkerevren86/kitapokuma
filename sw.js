@@ -1,5 +1,5 @@
 /* Sayfa — service worker: çevrimdışı çalışma + paylaşımdan dosya alma */
-const VERSION = 'sayfa-v1';
+const VERSION = 'sayfa-v2';
 const APP = ['./', 'index.html', 'styles.css', 'app.js', 'formats.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 const CDN = 'https://cdn.jsdelivr.net/npm/';
 const LIBS = [
