@@ -1,5 +1,5 @@
 /* Sayfa — service worker: çevrimdışı çalışma + paylaşımdan dosya alma */
-const VERSION = 'sayfa-v2';
+const VERSION = 'sayfa-v4';
 const APP = ['./', 'index.html', 'styles.css', 'app.js', 'formats.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 const CDN = 'https://cdn.jsdelivr.net/npm/';
 const LIBS = [
@@ -13,7 +13,8 @@ const LIBS = [
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
     const c = await caches.open(VERSION);
-    await c.addAll(APP);
+    // tarayıcının HTTP önbelleğini atla, her zaman sunucudaki en yeni dosyayı al
+    await c.addAll(APP.map((u) => new Request(u, { cache: 'reload' })));
     await Promise.all(LIBS.map((u) => c.add(new Request(u, { mode: 'cors' })).catch(() => {})));
     self.skipWaiting();
   })());
@@ -54,7 +55,8 @@ self.addEventListener('fetch', (e) => {
     e.respondWith((async () => {
       const c = await caches.open(VERSION);
       try {
-        const res = await fetch(req);
+        // no-cache: sunucuya "değişti mi?" diye sorar; GitHub Pages'in 10 dakikalık önbelleğine takılmaz
+        const res = await fetch(req, { cache: 'no-cache' });
         if (res.ok) c.put(req, res.clone());
         return res;
       } catch (err) {

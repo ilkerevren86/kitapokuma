@@ -2,6 +2,7 @@
 (function () {
   'use strict';
 
+  const APP_VERSION = '4';
   const $ = (s, r = document) => r.querySelector(s);
   const raf = () => new Promise((r) => setTimeout(r, 0));
   const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
@@ -678,6 +679,35 @@
     return n;
   }
 
+  // PageFlip, çevrilen sayfanın kopyasını (cloneNode) oynatır. Kopyalanan <canvas> boş gelir;
+  // bu yüzden PDF sayfası kıvrılırken boş görünür, bitince içerik "parlayarak" geri gelirdi.
+  // Kopya oluşturulduğu anda PDF çizimini kopyaya aktarıyoruz.
+  function patchTemporaryCopy(pf) {
+    try {
+      const pages = pf.getPageCollection().getPages();
+      if (!pages.length) return;
+      const proto = Object.getPrototypeOf(pages[0]);
+      if (proto.__sayfaPatched || typeof proto.newTemporaryCopy !== 'function') return;
+      const orig = proto.newTemporaryCopy;
+      proto.newTemporaryCopy = function () {
+        const fresh = this.temporaryCopy === null;
+        const res = orig.call(this);
+        if (fresh && this.copiedElement) {
+          const src = this.element.querySelectorAll('canvas');
+          const dst = this.copiedElement.querySelectorAll('canvas');
+          src.forEach((c, i) => {
+            const d = dst[i];
+            if (!d || !c.width) return;
+            d.width = c.width; d.height = c.height;
+            d.getContext('2d', { alpha: false }).drawImage(c, 0, 0);
+          });
+        }
+        return res;
+      };
+      proto.__sayfaPatched = true;
+    } catch (e) { console.warn('temporaryCopy yaması', e); }
+  }
+
   function buildBook(start) {
     if (R.pf) { try { R.pf.destroy(); } catch (e) { /* yok */ } R.pf = null; }
     stage.querySelectorAll('.book-wrap').forEach((b) => b.remove());
@@ -699,6 +729,7 @@
       disableFlipByClick: true, clickEventForward: true, useMouseEvents: true, startZIndex: 1,
     });
     pf.loadFromHTML(R.pages);
+    patchTemporaryCopy(pf);
     pf.on('flip', (e) => onPageChanged(e.data, true));
     pf.on('changeState', (e) => {
       if (e.data === 'flipping' || e.data === 'user_fold') R.lastFlipAt = performance.now();
@@ -1405,7 +1436,8 @@
         '<div class="set-row"><span>Okurken ekranı hep açık tut<small>Sesli okuma dışında da</small></span>' + sw('keepAwake', S.keepAwake) + '</div>' +
         '<div class="set-row"><span>PDF sayfalarını gece moduna uyarla</span>' + sw('pdfInvert', S.pdfInvert) + '</div>' +
         '<div class="set-row"><span>PDF kenar boşluklarını kırp<small>Yazıyı büyütmek için beyaz kenarları keser</small></span>' + sw('pdfCrop', S.pdfCrop) + '</div>' +
-      '</div>';
+      '</div>' +
+      '<p class="note" style="text-align:center">Sayfa · sürüm ' + APP_VERSION + '</p>';
     openSheet('Ayarlar', html, (b) => {
       let relayout = false;
       const relayoutSoon = () => { relayout = true; clearTimeout(openSettings.t); openSettings.t = setTimeout(doRelayout, 500); };
@@ -1647,7 +1679,19 @@
       });
     }
     if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-      navigator.serviceWorker.register('sw.js').catch((e) => console.warn('sw', e));
+      const hadController = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+        // uygulamaya her dönüşte güncelleme var mı bak
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+      }).catch((e) => console.warn('sw', e));
+      // yeni sürüm devreye girince bir kez yenile (sesli okuma sürüyorsa bekle)
+      let reloading = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || reloading) return;
+        const doReload = () => { if (reloading) return; reloading = true; saveProgressNow(); location.reload(); };
+        if (TTS.active) { toast('Yeni sürüm hazır; sesli okuma bitince yüklenecek', 4000); const iv = setInterval(() => { if (!TTS.active) { clearInterval(iv); doReload(); } }, 3000); }
+        else { toast('Uygulama güncellendi', 1500); setTimeout(doReload, 600); }
+      });
     }
   }
   boot();
