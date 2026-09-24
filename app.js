@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  const APP_VERSION = '5';
+  const APP_VERSION = '6';
   const $ = (s, r = document) => r.querySelector(s);
   const raf = () => new Promise((r) => setTimeout(r, 0));
   const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
@@ -50,7 +50,7 @@
     theme: 'day', fontSize: 19, font: 'Literata', lineHeight: 1.55, margin: 'normal', justify: true,
     layout: 'auto', sound: true, volume: 0.7, speed: 'normal', keepAwake: false,
     voice: '', rate: 1, pitch: 1, pdfInvert: true, dim: 0, lastDayTheme: 'day',
-    soundType: 'soft', pdfCrop: false,
+    soundType: 'soft', pdfCrop: false, singleFlip: 'hard',
   };
   let S = { ...DEFAULTS };
   try { Object.assign(S, JSON.parse(localStorage.getItem('sayfa.settings') || '{}')); } catch (e) { /* yok */ }
@@ -725,7 +725,13 @@
   function buildBook(start) {
     if (R.pf) { try { R.pf.destroy(); } catch (e) { /* yok */ } R.pf = null; }
     stage.querySelectorAll('.book-wrap').forEach((b) => b.remove());
-    R.pages.forEach((p) => p.removeAttribute('style'));
+    R.pages.forEach((p) => {
+      p.removeAttribute('style');
+      // Tek sayfada kıvrılma efekti kopya + kırpma ile yapılıyor ve yazıları karıştırıyordu;
+      // varsayılan olarak sayfayı sırtından dönen sert bir yaprak gibi çeviriyoruz.
+      if (!R.spread && S.singleFlip !== 'curl') p.dataset.density = 'hard';
+      else delete p.dataset.density;
+    });
     decoratePages();
     const wrap = el('div', 'book-wrap');
     const holder = el('div', 'book' + (R.spread ? ' spread' : ' single'));
@@ -1435,6 +1441,7 @@
         '<div class="set-row"><span>Çevirme sesi</span>' + sw('sound', S.sound) + '</div>' +
         chips('soundType', [['soft', 'Yumuşak kağıt'], ['crisp', 'Belirgin kağıt'], ['custom', 'Kendi sesim']], S.soundType) +
         '<div class="set-row" style="margin-top:6px"><span>Ses düzeyi</span><input type="range" min="0.05" max="1" step="0.05" value="' + S.volume + '" data-range="volume"></div>' +
+        '<div class="set-row"><span>Tek sayfada çevirme</span>' + chips('singleFlip', [['hard', 'Sayfa dönsün'], ['curl', 'Kıvrılsın']], S.singleFlip) + '</div>' +
         '<div class="set-row"><span>Çevirme hızı</span>' + chips('speed', [['slow', 'Yavaş'], ['normal', 'Normal'], ['fast', 'Hızlı']], S.speed) + '</div>' +
         '<div class="btn-col" style="grid-template-columns:1fr 1fr"><button class="btn ghost" id="testFlip">Sesi dene</button><button class="btn ghost" id="pickSound">Ses dosyası seç</button></div>' +
         '<p class="note" style="padding-bottom:0">"Kendi sesim" ile telefonunuzdaki herhangi bir kısa sayfa çevirme sesini (MP3, WAV, OGG) kullanabilirsiniz.</p>' +
@@ -1462,6 +1469,7 @@
             const k = grp.dataset.set; S[k] = btn.dataset.v; saveSettings();
             grp.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === btn));
             if (k === 'theme') { if (S.theme === 'day' || S.theme === 'sepia') S.lastDayTheme = S.theme; applyTheme(); }
+            else if (k === 'singleFlip') { if (R.pf) buildBook(visiblePages()[0]); }
             else if (k === 'speed') { if (R.pf) { const pos = currentPos(); buildBook(R.kind === 'flow' ? visiblePages()[0] : pos.page); } }
             else if (k === 'soundType') {
               if (S.soundType === 'custom' && !Sfx.custom) { $('#soundFile').click(); return; }
