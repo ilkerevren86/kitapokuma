@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#16110d">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="description" content="Gerçekçi sayfa çevirme, gece modu ve sesli okuma ile kitap okuyucu">
+<title>Sayfa</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&family=Merriweather:ital,wght@0,400;0,700;1,400&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=Nunito+Sans:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-theme="day">
+
+<!-- ============ KİTAPLIK ============ -->
+<section id="library" class="screen active" aria-label="Kitaplık">
+  <header class="lib-head">
+    <div class="brand">
+      <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M6 12c6-3 12-3 18 1v26c-6-4-12-4-18-1z" fill="currentColor" opacity=".85"/><path d="M42 12c-6-3-12-3-18 1v26c6-4 12-4 18-1z" fill="currentColor"/><path d="M33 10v12l3-2 3 2V10z" fill="#c2452d"/></svg>
+      <span>Sayfa</span>
+    </div>
+    <div class="lib-actions">
+      <button class="icon-btn" id="libTheme" aria-label="Tema değiştir" title="Tema"></button>
+    </div>
+  </header>
+
+  <div class="lib-scroll">
+    <section id="continueSec" hidden>
+      <h2 class="sec-title">Kaldığım Yer</h2>
+      <div id="continueList"></div>
+    </section>
+
+    <section>
+      <div class="sec-row">
+        <h2 class="sec-title">Kitaplığım</h2>
+        <span id="bookCount" class="muted"></span>
+      </div>
+      <div id="bookGrid" class="grid"></div>
+      <div id="emptyState" class="empty" hidden>
+        <svg viewBox="0 0 120 90" aria-hidden="true"><path d="M10 20c16-8 32-8 50 2v58c-18-10-34-10-50-2z" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M110 20c-16-8-32-8-50 2v58c18-10 34-10 50-2z" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M20 34c9-3 18-3 30 1M20 44c9-3 18-3 30 1M20 54c9-3 18-3 30 1M70 35c12-4 21-4 30-1M70 45c12-4 21-4 30-1" stroke="currentColor" stroke-width="2" opacity=".5"/></svg>
+        <p><strong>Kitaplığınız boş</strong></p>
+        <p class="muted">PDF, Word (DOC/DOCX), EPUB, ODT, RTF veya TXT dosyası ekleyin. Kitaplar bu cihazda saklanır, internetsiz de okunur.</p>
+      </div>
+    </section>
+  </div>
+
+  <label class="fab" for="fileInput">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+    <span>Kitap ekle</span>
+  </label>
+  <input type="file" id="fileInput" multiple hidden
+    accept=".pdf,.doc,.docx,.epub,.odt,.rtf,.txt,.md,.html,.htm,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/epub+zip,application/vnd.oasis.opendocument.text,application/rtf,text/rtf,text/plain,text/markdown,text/html">
+</section>
+
+<!-- ============ OKUYUCU ============ -->
+<section id="reader" class="screen" aria-label="Okuyucu">
+  <div id="stage"></div>
+  <div id="dimmer"></div>
+
+  <header id="topBar" class="bar top">
+    <button class="icon-btn" id="btnBack" aria-label="Kitaplığa dön"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg></button>
+    <div class="bar-title">
+      <div id="bookTitle">—</div>
+      <div id="chapTitle" class="muted"></div>
+    </div>
+    <button class="icon-btn" id="btnToc" aria-label="İçindekiler"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg></button>
+    <button class="icon-btn" id="btnMark" aria-label="Yer imi ekle"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4.5L6 21z"/></svg></button>
+    <button class="icon-btn" id="btnSettings" aria-label="Ayarlar"><svg viewBox="0 0 24 24"><path d="M3 19l5.5-14h1L15 19M5 14h8M16 19l3-8h1l3 8M17 16.5h4.5" /></svg></button>
+  </header>
+
+  <footer id="bottomBar" class="bar bottom">
+    <div class="slider-row">
+      <input type="range" id="pageSlider" min="1" max="1" value="1" aria-label="Sayfa">
+      <span id="pageLabel">1 / 1</span>
+    </div>
+    <div class="ctrl-row">
+      <button class="icon-btn" id="btnNight" aria-label="Gece modu"><svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/></svg></button>
+      <button class="icon-btn" id="btnMarks" aria-label="Yer imlerim"><svg viewBox="0 0 24 24"><path d="M8 3h11v16l-5.5-4L8 19z M5 6v15l5-3.5"/></svg></button>
+      <button class="icon-btn" id="btnPrev" aria-label="Önceki sayfa"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <button class="tts-btn" id="btnTts" aria-label="Sesli oku">
+        <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/></svg>
+        <svg class="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor" stroke="none"/></svg>
+        <span>Sesli oku</span>
+      </button>
+      <button class="icon-btn" id="btnNext" aria-label="Sonraki sayfa"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
+      <button class="icon-btn" id="btnStop" aria-label="Sesli okumayı durdur" disabled><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg></button>
+      <button class="icon-btn" id="btnTimer" aria-label="Uyku zamanlayıcısı"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></svg><b id="timerBadge"></b></button>
+    </div>
+  </footer>
+
+  <div id="ttsPill" hidden>
+    <span class="dot"></span>
+    <span id="pillText">Sesli okuma · ekran açık</span>
+    <button id="pillPause" aria-label="Duraklat">
+      <svg viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg>
+    </button>
+  </div>
+
+  <div id="loading" hidden>
+    <div class="spinner"><div></div><div></div><div></div></div>
+    <p id="loadingText">Açılıyor…</p>
+    <div class="progress"><i id="loadingBar"></i></div>
+  </div>
+</section>
+
+<div id="measure" aria-hidden="true"></div>
+
+<div id="scrim" hidden></div>
+<div id="sheet" role="dialog" aria-modal="true" hidden>
+  <div class="sheet-handle"></div>
+  <div class="sheet-head"><h3 id="sheetTitle"></h3><button class="icon-btn" id="sheetClose" aria-label="Kapat"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <div id="sheetBody"></div>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="formats.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
