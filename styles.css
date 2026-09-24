@@ -173,6 +173,10 @@ button { font: inherit; color: inherit; }
 .page.right::after { background: linear-gradient(to right, rgba(0,0,0,.26) 0, rgba(0,0,0,.10) 2.2%, rgba(0,0,0,.03) 6%, transparent 11%), linear-gradient(to left, rgba(0,0,0,.05), transparent 2.5%); }
 .page.single::after { background: linear-gradient(to right, rgba(0,0,0,.16) 0, rgba(0,0,0,.05) 1.8%, transparent 6%), linear-gradient(to left, rgba(0,0,0,.05), transparent 2.5%); }
 
+/* kıvrılan sayfanın arka yüzü: kağıdın arkası, ön yüzdeki yazı ters ve çok silik seçilir */
+.page.flap .pg, .page.flap .pdf-holder, .page.flap .ribbon { opacity: .055; transform: scaleX(-1); }
+.page.flap::after { background: linear-gradient(to left, rgba(0,0,0,.10) 0, rgba(255,255,255,.06) 35%, rgba(0,0,0,.04) 100%) !important; }
+
 .pg { position: absolute; inset: 0; display: flex; flex-direction: column; padding: var(--mt) var(--mo) var(--mb) var(--mi); z-index: 1; }
 .page.left .pg { padding-left: var(--mo); padding-right: var(--mi); }
 .pg-head { flex: none; height: 26px; font-family: var(--font); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; text-align: center; opacity: .5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

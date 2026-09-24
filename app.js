@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  const APP_VERSION = '4';
+  const APP_VERSION = '5';
   const $ = (s, r = document) => r.querySelector(s);
   const raf = () => new Promise((r) => setTimeout(r, 0));
   const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
@@ -693,6 +693,10 @@
         const fresh = this.temporaryCopy === null;
         const res = orig.call(this);
         if (fresh && this.copiedElement) {
+          // kopya, kıvrılan sayfanın ARKA yüzüdür: yazı yerine boş kağıt ve ters, silik bir iz göster
+          this.copiedElement.classList.add('flap');
+          // ilk animasyon karesi çizilene kadar gizli kalsın (yoksa bir an kırpılmadan tam sayfa görünür)
+          this.copiedElement.style.display = 'none';
           const src = this.element.querySelectorAll('canvas');
           const dst = this.copiedElement.querySelectorAll('canvas');
           src.forEach((c, i) => {
@@ -706,6 +710,16 @@
       };
       proto.__sayfaPatched = true;
     } catch (e) { console.warn('temporaryCopy yaması', e); }
+  }
+
+  // PageFlip'in flipPrev'i dokunuşu sabit x=10 noktasına gönderir; tek sayfa (portrait) modunda bu nokta
+  // sayfanın dışında kalır ve "yalnızca köşeden çevir" ayarı yüzünden yok sayılırdı. Kısa süreliğine gevşetiyoruz.
+  function flipPrev() {
+    if (!R.pf || R.cur <= 0) return;
+    const st = R.pf.getSettings();
+    const old = st.disableFlipByClick;
+    st.disableFlipByClick = false;
+    try { R.pf.flipPrev('bottom'); } finally { st.disableFlipByClick = old; }
   }
 
   function buildBook(start) {
@@ -1269,7 +1283,7 @@
     lastTap = { t: now, x: e.clientX, y: e.clientY };
     const act = () => {
       if (performance.now() - R.lastFlipAt < 350) return; // PageFlip köşe dokunuşunu zaten işledi
-      if (x < 0.22) R.pf.flipPrev('bottom');
+      if (x < 0.22) flipPrev();
       else if (x > 0.78) R.pf.flipNext('bottom');
       else toggleChrome();
     };
@@ -1296,12 +1310,12 @@
   document.addEventListener('keydown', (e) => {
     if (!reader.classList.contains('active') || !R.pf || !$('#sheet').hidden) return;
     if (['ArrowRight', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); R.pf.flipNext(); }
-    else if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); R.pf.flipPrev(); }
+    else if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); flipPrev(); }
     else if (e.key === 'Escape') closeReader();
   });
 
   $('#btnBack').onclick = closeReader;
-  $('#btnPrev').onclick = () => R.pf && R.pf.flipPrev('bottom');
+  $('#btnPrev').onclick = () => flipPrev();
   $('#btnNext').onclick = () => R.pf && R.pf.flipNext('bottom');
   $('#btnMark').onclick = toggleMark;
   $('#btnNight').onclick = toggleNight;
